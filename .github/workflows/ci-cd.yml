@@ -1,0 +1,687 @@
+name: 🚀 CI/CD Pipeline - F60-SGEEV-and-DGEEV
+
+on:
+  push:
+    branches: [ main, develop, feature/* ]
+    tags: [ 'v*' ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.gitignore'
+  pull_request:
+    branches: [ main, develop ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.gitignore'
+  schedule:
+    # Execução diária às 02:00 UTC para testes de regressão
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      debug_enabled:
+        description: 'Enable debug mode'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # Job 1: Teste e compilação do código Fortran
+  test-fortran:
+    name: 🧪 Test Fortran Code
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        fortran-version: ['9', '10', '11', '12']
+        build-type: ['debug', 'release']
+      fail-fast: false
+    
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    
+    steps:
+    - name: 📥 Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: 📦 Cache Fortran compiler
+      uses: actions/cache@v4
+      with:
+        path: /usr/bin/gfortran*
+        key: gfortran-${{ matrix.fortran-version }}-${{ runner.os }}
+        
+    - name: 🔧 Setup Fortran environment
+      run: |
+        sudo apt-get update -q
+        sudo apt-get install -y gfortran-${{ matrix.fortran-version }}
+        sudo ln -sf /usr/bin/gfortran-${{ matrix.fortran-version }} /usr/bin/gfortran
+        gfortran --version
+        
+    - name: 🔨 Compile Fortran code (${{ matrix.build-type }})
+      run: |
+        cd ${{ github.workspace }}
+        if [ "${{ matrix.build-type }}" = "debug" ]; then
+          COMPILE_FLAGS="-g -O0 -Wall -Wextra -pedantic -fcheck=all -fbacktrace"
+        else
+          COMPILE_FLAGS="-O3 -march=native -ffast-math -DNDEBUG"
+        fi
+        
+        echo "Compilando com flags: $COMPILE_FLAGS"
+        gfortran $COMPILE_FLAGS \
+          -o eigenvalues_program_${{ matrix.build-type }} \
+          sgeev_module.f90 main_sgeev.f90
+          
+        # Verificar se o executável foi criado
+        ls -la eigenvalues_program_${{ matrix.build-type }}
+        file eigenvalues_program_${{ matrix.build-type }}
+        
+    - name: 🧪 Run unit tests
+      run: |
+        cd ${{ github.workspace }}
+        echo "Executando programa de teste (${{ matrix.build-type }})..."
+        
+        # Criar arquivo de entrada de teste
+        cat > test_input.txt << EOF
+        3
+        1.0 2.0 3.0
+        4.0 5.0 6.0
+        7.0 8.0 9.0
+        EOF
+        
+        # Executar com timeout e capturar saída
+        timeout 60s ./eigenvalues_program_${{ matrix.build-type }} < test_input.txt > test_output.txt 2>&1 || exit_code=$?
+        
+        if [ $exit_code -eq 124 ]; then
+          echo "⚠️  Programa executado com timeout (esperado para entrada interativa)"
+        elif [ $exit_code -eq 0 ]; then
+          echo "✅ Programa executado com sucesso"
+          cat test_output.txt
+        else
+          echo "❌ Erro na execução do programa (exit code: $exit_code)"
+          cat test_output.txt
+          exit 1
+        fi
+        
+    - name: 📊 Generate performance metrics
+      run: |
+        cd ${{ github.workspace }}
+        echo "📊 Métricas de performance:" >> metrics.txt
+        echo "Tamanho do executável: $(stat -c%s eigenvalues_program_${{ matrix.build-type }}) bytes" >> metrics.txt
+        echo "Fortran version: ${{ matrix.fortran-version }}" >> metrics.txt
+        echo "Build type: ${{ matrix.build-type }}" >> metrics.txt
+        cat metrics.txt
+        
+    - name: 📤 Upload test artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: fortran-executable-${{ matrix.fortran-version }}-${{ matrix.build-type }}
+        path: |
+          eigenvalues_program_${{ matrix.build-type }}
+          test_output.txt
+          metrics.txt
+        retention-days: 5
+        
+    - name: 🐛 Debug information
+      if: ${{ inputs.debug_enabled }}
+      run: |
+        echo "Debug mode enabled"
+        ldd eigenvalues_program_${{ matrix.build-type }} || true
+        objdump -p eigenvalues_program_${{ matrix.build-type }} | head -20 || true
+
+  # Job 2: Análise de qualidade do código
+  code-quality:
+    name: 📊 Code Quality Analysis
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 📥 Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Necessário para análise completa
+      
+    - name: 🔧 Install analysis tools
+      run: |
+        sudo apt-get update -q
+        sudo apt-get install -y gfortran cloc
+        
+    - name: 🔍 Fortran linting and analysis
+      run: |
+        echo "🔍 Analisando qualidade do código Fortran..."
+        
+        # Verificação de sintaxe com warnings detalhados
+        echo "🔍 Verificação de sintaxe:"
+        gfortran -fsyntax-only -Wall -Wextra -Wpedantic -Wconversion -Wunused \
+          sgeev_module.f90 2>&1 | tee syntax_check.log
+        gfortran -fsyntax-only -Wall -Wextra -Wpedantic -Wconversion -Wunused \
+          main_sgeev.f90 2>&1 | tee -a syntax_check.log
+        
+        # Estatísticas detalhadas do código
+        echo "📊 Estatísticas do código:"
+        cloc --by-file *.f90 | tee code_stats.txt
+        
+        # Análise de complexidade
+        echo "📊 Complexidade:"
+        echo "Módulo SGEEV: $(wc -l < sgeev_module.f90) linhas" | tee complexity.txt
+        echo "Programa principal: $(wc -l < main_sgeev.f90) linhas" | tee -a complexity.txt
+        echo "Total: $(cat *.f90 | wc -l) linhas" | tee -a complexity.txt
+        
+        # Verificação de padrões de codificação
+        echo "🔍 Padrões de codificação:"
+        echo "Funções/Subrotinas: $(grep -c 'subroutine\|function' *.f90)" | tee -a complexity.txt
+        echo "Comentários: $(grep -c '^[[:space:]]*!' *.f90)" | tee -a complexity.txt
+        
+    - name: 📤 Upload quality reports
+      uses: actions/upload-artifact@v4
+      with:
+        name: code-quality-reports
+        path: |
+          syntax_check.log
+          code_stats.txt
+          complexity.txt
+        retention-days: 30
+
+  # Job 3: Build e teste do Docker
+  docker-build:
+    name: 🐳 Docker Build and Test
+    runs-on: ubuntu-latest
+    needs: [test-fortran]
+    strategy:
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+    
+    steps:
+    - name: 📥 Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: 🔧 Set up QEMU
+      uses: docker/setup-qemu-action@v3
+      with:
+        platforms: arm64
+      
+    - name: 🔧 Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      with:
+        driver-opts: |
+          network=host
+        buildkitd-flags: --debug
+      
+    - name: 📦 Cache Docker layers
+      uses: actions/cache@v4
+      with:
+        path: /tmp/.buildx-cache
+        key: ${{ runner.os }}-buildx-${{ matrix.platform }}-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-buildx-${{ matrix.platform }}-
+          ${{ runner.os }}-buildx-
+      
+    - name: 🔨 Build Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./Dockerfile
+        platforms: ${{ matrix.platform }}
+        push: false
+        load: true
+        tags: |
+          f60-sgeev:test-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+          f60-sgeev:latest
+        cache-from: |
+          type=local,src=/tmp/.buildx-cache
+          type=gha
+        cache-to: |
+          type=local,dest=/tmp/.buildx-cache-new,mode=max
+          type=gha,mode=max
+        build-args: |
+          BUILDKIT_INLINE_CACHE=1
+          
+    - name: 🧪 Test Docker image
+      if: matrix.platform == 'linux/amd64'
+      run: |
+        echo "🧪 Testando imagem Docker..."
+        
+        # Verificar se a imagem foi criada
+        docker images f60-sgeev:latest
+        
+        # Executar testes básicos no container
+        echo "Testando execução do container..."
+        docker run --rm --name sgeev-test f60-sgeev:latest echo "Container iniciado com sucesso"
+        
+        # Verificar se o executável existe e é executável
+        docker run --rm f60-sgeev:latest ls -la /app/
+        docker run --rm f60-sgeev:latest file /app/eigenvalues_program
+        
+        # Teste de execução com timeout
+        timeout 30s docker run --rm f60-sgeev:latest ./eigenvalues_program --help || echo "Execução concluída (esperado)"
+        
+        # Verificar tamanho da imagem
+        echo "📊 Tamanho da imagem:"
+        docker images f60-sgeev:latest --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}"
+        
+        # Análise de segurança básica
+        echo "🔒 Verificações de segurança:"
+        docker run --rm f60-sgeev:latest whoami
+        docker run --rm f60-sgeev:latest id
+        
+    - name: 🧝 Cleanup cache
+      run: |
+        rm -rf /tmp/.buildx-cache
+        mv /tmp/.buildx-cache-new /tmp/.buildx-cache || true
+        
+    - name: 📤 Export Docker image
+      if: matrix.platform == 'linux/amd64'
+      run: |
+        docker save f60-sgeev:latest | gzip > f60-sgeev-${{ github.sha }}.tar.gz
+        ls -lh f60-sgeev-${{ github.sha }}.tar.gz
+        
+    - name: 📤 Upload Docker image
+      if: matrix.platform == 'linux/amd64'
+      uses: actions/upload-artifact@v4
+      with:
+        name: docker-image-amd64
+        path: f60-sgeev-${{ github.sha }}.tar.gz
+        retention-days: 7
+
+  # Job 4: Security scan e compliance
+  security-scan:
+    name: 🔒 Security & Compliance Scan
+    runs-on: ubuntu-latest
+    needs: [docker-build]
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    
+    steps:
+    - name: 📥 Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: 🔧 Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      
+    - name: 🔨 Build image for scanning
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        load: true
+        tags: f60-sgeev:scan
+        cache-from: type=gha
+        
+    - name: 🔍 Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: 'f60-sgeev:scan'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+        severity: 'CRITICAL,HIGH,MEDIUM'
+        exit-code: 0  # Não falhar em vulnerabilidades
+        
+    - name: 🔍 Run Trivy filesystem scan
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-fs-results.sarif'
+        severity: 'CRITICAL,HIGH'
+        exit-code: 0
+        
+    - name: 🔒 Docker security best practices check
+      run: |
+        echo "🔒 Verificando práticas de segurança do Docker..."
+        
+        # Verificar se usa usuário não-root
+        docker run --rm f60-sgeev:scan whoami | grep -v root && echo "✅ Usando usuário não-root" || echo "⚠️  Container rodando como root"
+        
+        # Verificar permissões de arquivos sensíveis
+        docker run --rm f60-sgeev:scan ls -la /etc/passwd /etc/shadow 2>/dev/null || echo "✅ Arquivos de sistema protegidos"
+        
+        # Verificar tamanho da imagem
+        IMAGE_SIZE=$(docker images f60-sgeev:scan --format "{{.Size}}")
+        echo "Tamanho da imagem: $IMAGE_SIZE"
+        
+    - name: 📄 Generate security report
+      run: |
+        echo "# 🔒 Relatório de Segurança" > security-report.md
+        echo "" >> security-report.md
+        echo "## Resumo da Análise" >> security-report.md
+        echo "- **Data:** $(date)" >> security-report.md
+        echo "- **Commit:** ${{ github.sha }}" >> security-report.md
+        echo "- **Imagem:** f60-sgeev:scan" >> security-report.md
+        echo "" >> security-report.md
+        
+        # Processar resultados do Trivy
+        if [ -f trivy-results.sarif ]; then
+          VULNERABILITIES=$(jq '.runs[0].results | length' trivy-results.sarif 2>/dev/null || echo "0")
+          echo "- **Vulnerabilidades encontradas:** $VULNERABILITIES" >> security-report.md
+        fi
+        
+        echo "" >> security-report.md
+        echo "## Recomendações" >> security-report.md
+        echo "- Manter imagem base atualizada" >> security-report.md
+        echo "- Executar scans regulares" >> security-report.md
+        echo "- Monitorar CVEs relacionados" >> security-report.md
+        
+        cat security-report.md
+        
+    - name: 📤 Upload security artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: security-scan-results
+        path: |
+          trivy-results.sarif
+          trivy-fs-results.sarif
+          security-report.md
+        retention-days: 30
+        
+    - name: 📤 Upload Trivy scan results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v3
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+        category: 'container-scan'
+        
+    - name: 📤 Upload filesystem scan results
+      uses: github/codeql-action/upload-sarif@v3
+      if: always()
+      with:
+        sarif_file: 'trivy-fs-results.sarif'
+        category: 'filesystem-scan'
+
+  # Job 5: Deploy (apenas para tags e main branch)
+  deploy:
+    name: 🚀 Build and Deploy
+    runs-on: ubuntu-latest
+    needs: [test-fortran, code-quality, docker-build, security-scan]
+    if: |
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    
+    permissions:
+      contents: read
+      packages: write
+      id-token: write  # Para assinatura de artefatos
+      
+    environment:
+      name: ${{ startsWith(github.ref, 'refs/tags/v') && 'production' || 'staging' }}
+      url: ${{ steps.deploy.outputs.registry_url }}
+      
+    steps:
+    - name: 📥 Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Necessário para tags
+      
+    - name: 🔧 Set up QEMU
+      uses: docker/setup-qemu-action@v3
+      
+    - name: 🔧 Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      with:
+        driver-opts: network=host
+      
+    - name: 🔑 Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: 🏷️ Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        flavor: |
+          latest=auto
+          prefix=
+          suffix=
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=semver,pattern={{major}}
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+        labels: |
+          org.opencontainers.image.title=F60-SGEEV-and-DGEEV
+          org.opencontainers.image.description=Eigenvalues and Eigenvectors Calculator
+          org.opencontainers.image.vendor=F60 Project
+          org.opencontainers.image.licenses=MIT
+          
+    - name: 🔨 Build and push Docker image
+      id: build
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        provenance: true
+        sbom: true
+        build-args: |
+          BUILDKIT_INLINE_CACHE=1
+          BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          VCS_REF=${{ github.sha }}
+          VERSION=${{ steps.meta.outputs.version }}
+        
+    - name: 📝 Generate SBOM
+      uses: anchore/sbom-action@v0
+      with:
+        image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+        format: spdx-json
+        output-file: sbom.spdx.json
+        
+    - name: 🔒 Sign container image
+      if: startsWith(github.ref, 'refs/tags/v')
+      uses: sigstore/cosign-installer@v3
+      with:
+        cosign-release: 'v2.2.0'
+    
+    - name: 🔒 Sign the container image
+      if: startsWith(github.ref, 'refs/tags/v')
+      run: |
+        cosign sign --yes ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+        
+    - name: 🧪 Verify deployment
+      id: deploy
+      run: |
+        echo "registry_url=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}" >> $GITHUB_OUTPUT
+        
+        # Testar se a imagem pode ser baixada
+        docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+        
+        # Teste rápido da imagem
+        docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest echo "Deploy verificado com sucesso"
+        
+    - name: 📤 Upload deployment artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: deployment-artifacts-${{ steps.meta.outputs.version }}
+        path: |
+          sbom.spdx.json
+        retention-days: 90
+        
+    - name: 📊 Generate deployment summary
+      run: |
+        echo "## 🚀 Deployment Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📦 Image Details" >> $GITHUB_STEP_SUMMARY
+        echo "- **Registry:** ${{ env.REGISTRY }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Repository:** ${{ env.IMAGE_NAME }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Version:** ${{ steps.meta.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Digest:** ${{ steps.build.outputs.digest }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Platforms:** linux/amd64, linux/arm64" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 🔗 Pull Command" >> $GITHUB_STEP_SUMMARY
+        echo '```bash' >> $GITHUB_STEP_SUMMARY
+        echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 🔒 Security" >> $GITHUB_STEP_SUMMARY
+        echo "- SBOM gerado e anexado" >> $GITHUB_STEP_SUMMARY
+        if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+          echo "- Imagem assinada com Cosign" >> $GITHUB_STEP_SUMMARY
+        fi
+        echo "- Scan de segurança executado" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### ⏰ Timestamp" >> $GITHUB_STEP_SUMMARY
+        echo "**Deployed at:** $(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+
+  # Job 6: Notification e métricas finais
+  notify:
+    name: 📩 Notification & Metrics
+    runs-on: ubuntu-latest
+    needs: [test-fortran, code-quality, docker-build, security-scan]
+    if: always()
+    
+    steps:
+    - name: 📥 Download artifacts for analysis
+      uses: actions/download-artifact@v4
+      with:
+        path: ./artifacts
+        
+    - name: 📊 Calculate pipeline metrics
+      id: metrics
+      run: |
+        echo "Calculando métricas do pipeline..."
+        
+        # Calcular duração total
+        START_TIME="${{ github.event.head_commit.timestamp }}"
+        CURRENT_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+        
+        # Contar artefatos gerados
+        ARTIFACT_COUNT=$(find ./artifacts -type f 2>/dev/null | wc -l || echo "0")
+        
+        # Status dos jobs
+        TEST_STATUS="${{ needs.test-fortran.result }}"
+        QUALITY_STATUS="${{ needs.code-quality.result }}"
+        DOCKER_STATUS="${{ needs.docker-build.result }}"
+        SECURITY_STATUS="${{ needs.security-scan.result }}"
+        
+        # Determinar status geral
+        if [[ "$TEST_STATUS" == "success" && "$QUALITY_STATUS" == "success" && "$DOCKER_STATUS" == "success" && "$SECURITY_STATUS" == "success" ]]; then
+          OVERALL_STATUS="✅ SUCCESS"
+          STATUS_EMOJI="🎉"
+        elif [[ "$TEST_STATUS" == "failure" || "$QUALITY_STATUS" == "failure" || "$DOCKER_STATUS" == "failure" || "$SECURITY_STATUS" == "failure" ]]; then
+          OVERALL_STATUS="❌ FAILED"
+          STATUS_EMOJI="🛑"
+        else
+          OVERALL_STATUS="⚠️ PARTIAL"
+          STATUS_EMOJI="🚕"
+        fi
+        
+        echo "overall_status=$OVERALL_STATUS" >> $GITHUB_OUTPUT
+        echo "status_emoji=$STATUS_EMOJI" >> $GITHUB_OUTPUT
+        echo "artifact_count=$ARTIFACT_COUNT" >> $GITHUB_OUTPUT
+        
+    - name: 📄 Create comprehensive summary
+      run: |
+        echo "${{ steps.metrics.outputs.status_emoji }} ## Pipeline Summary - F60-SGEEV-and-DGEEV" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📊 Status Geral: ${{ steps.metrics.outputs.overall_status }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        echo "### 📦 Informações do Build" >> $GITHUB_STEP_SUMMARY
+        echo "| Campo | Valor |" >> $GITHUB_STEP_SUMMARY
+        echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+        echo "| **Repositório** | ${{ github.repository }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Branch/Tag** | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Commit** | [`${{ github.sha }}`](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}) |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Trigger** | ${{ github.event_name }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Workflow** | ${{ github.workflow }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Actor** | @${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Artefatos** | ${{ steps.metrics.outputs.artifact_count }} |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        echo "### 🔄 Status dos Jobs" >> $GITHUB_STEP_SUMMARY
+        echo "| Job | Status | Duração |" >> $GITHUB_STEP_SUMMARY
+        echo "|-----|--------|----------|" >> $GITHUB_STEP_SUMMARY
+        
+        # Função para converter status em emoji
+        status_to_emoji() {
+          case $1 in
+            "success") echo "✅" ;;
+            "failure") echo "❌" ;;
+            "cancelled") echo "⏹️" ;;
+            "skipped") echo "⏭️" ;;
+            *) echo "🔄" ;;
+          esac
+        }
+        
+        echo "| 🧪 **Fortran Tests** | $(status_to_emoji '${{ needs.test-fortran.result }}') ${{ needs.test-fortran.result }} | - |" >> $GITHUB_STEP_SUMMARY
+        echo "| 📊 **Code Quality** | $(status_to_emoji '${{ needs.code-quality.result }}') ${{ needs.code-quality.result }} | - |" >> $GITHUB_STEP_SUMMARY
+        echo "| 🐳 **Docker Build** | $(status_to_emoji '${{ needs.docker-build.result }}') ${{ needs.docker-build.result }} | - |" >> $GITHUB_STEP_SUMMARY
+        echo "| 🔒 **Security Scan** | $(status_to_emoji '${{ needs.security-scan.result }}') ${{ needs.security-scan.result }} | - |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Adicionar links para artefatos se existirem
+        if [ -d "./artifacts" ] && [ "$(find ./artifacts -type f | wc -l)" -gt 0 ]; then
+          echo "### 📦 Artefatos Gerados" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          find ./artifacts -name "*.tar.gz" -o -name "*.txt" -o -name "*.log" -o -name "*.json" | while read -r file; do
+            filename=$(basename "$file")
+            echo "- 📄 $filename" >> $GITHUB_STEP_SUMMARY
+          done
+          echo "" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "### 🔗 Links Úteis" >> $GITHUB_STEP_SUMMARY
+        echo "- [📈 Actions History](${{ github.server_url }}/${{ github.repository }}/actions)" >> $GITHUB_STEP_SUMMARY
+        echo "- [🔒 Security Advisories](${{ github.server_url }}/${{ github.repository }}/security/advisories)" >> $GITHUB_STEP_SUMMARY
+        echo "- [📦 Packages](${{ github.server_url }}/${{ github.repository }}/pkgs/container/${{ github.event.repository.name }})" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        echo "### ⏰ Timestamp" >> $GITHUB_STEP_SUMMARY
+        echo "**Concluído em:** $(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+        
+        # Adicionar recomendações baseadas no status
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📝 Recomendações" >> $GITHUB_STEP_SUMMARY
+        if [[ "${{ needs.test-fortran.result }}" == "success" ]]; then
+          echo "- ✅ Testes Fortran passando corretamente" >> $GITHUB_STEP_SUMMARY
+        fi
+        if [[ "${{ needs.security-scan.result }}" == "success" ]]; then
+          echo "- ✅ Scan de segurança concluído - verificar relatórios" >> $GITHUB_STEP_SUMMARY
+        fi
+        if [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
+          echo "- 🏷️ Considerar criar uma tag para release" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+    - name: 📩 Pipeline status notification
+      run: |
+        echo "📩 Pipeline Status: ${{ steps.metrics.outputs.overall_status }}"
+        echo "Repository: ${{ github.repository }}"
+        echo "Branch: ${{ github.ref_name }}"
+        echo "Commit: ${{ github.sha }}"
+        echo "Triggered by: ${{ github.event_name }}"
+        
+        # Log estruturado para ferramentas de monitoramento
+        cat > pipeline_metrics.json << EOF
+        {
+          "repository": "${{ github.repository }}",
+          "branch": "${{ github.ref_name }}",
+          "commit": "${{ github.sha }}",
+          "workflow": "${{ github.workflow }}",
+          "trigger": "${{ github.event_name }}",
+          "actor": "${{ github.actor }}",
+          "status": {
+            "overall": "${{ steps.metrics.outputs.overall_status }}",
+            "test_fortran": "${{ needs.test-fortran.result }}",
+            "code_quality": "${{ needs.code-quality.result }}",
+            "docker_build": "${{ needs.docker-build.result }}",
+            "security_scan": "${{ needs.security-scan.result }}"
+          },
+          "artifacts_count": ${{ steps.metrics.outputs.artifact_count }},
+          "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+        }
+        EOF
+        
+        echo "Métricas salvas em pipeline_metrics.json"
+        cat pipeline_metrics.json

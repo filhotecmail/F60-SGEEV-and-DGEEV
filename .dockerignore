@@ -1,0 +1,77 @@
+# Ignorar arquivos desnecessários para o build Docker
+
+# Git
+.git
+.gitignore
+.gitattributes
+
+# GitHub Actions
+.github/
+
+# Documentação
+README.md
+docs/
+*.md
+
+# Arquivos temporários e de build local
+*.o
+*.mod
+*.exe
+eigenvalues_program
+eigenvalues_program_*
+
+# Diretórios de dados e output
+data/
+output/
+logs/
+tmp/
+
+# IDE e editores
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Docker
+Dockerfile.dev
+docker-compose.override.yml
+.dockerignore
+
+# Scripts locais
+scripts/local/
+scripts/dev/
+
+# Arquivos de teste locais
+test_input.txt
+test_output.txt
+*.log
+
+# Arquivos de configuração local
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+
+# Backups
+*.bak
+*.backup
+
+# Arquivos do sistema
+.DS_Store
+Thumbs.db
+
+# Artifacts do CI/CD
+*.tar.gz
+*.zip
+artifacts/
+
+# Cache
+.cache/
+node_modules/
+
+# Relatórios
+coverage/
+reports/
+*.sarif

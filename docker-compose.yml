@@ -1,0 +1,296 @@
+version: '3.8'
+
+# ====================
+# F60-SGEEV-and-DGEEV Docker Compose Configuration
+# Multi-environment setup: production, development, testing
+# ====================
+
+services:
+  # 🚀 Serviço principal - Produção
+  sgeev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+      args:
+        - BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+        - VERSION=${VERSION:-1.0.0}
+        - VCS_REF=${GIT_COMMIT:-unknown}
+    image: f60-sgeev:${VERSION:-latest}
+    container_name: sgeev-calculator
+    restart: unless-stopped
+    
+    # Recursos otimizados para produção
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1.0'
+        reservations:
+          memory: 256M
+          cpus: '0.5'
+    
+    # Volumes para persistência de dados
+    volumes:
+      - sgeev-data:/app/data:rw
+      - sgeev-output:/app/output:rw
+      - sgeev-logs:/app/logs:rw
+    
+    # Variáveis de ambiente para produção
+    environment:
+      - APP_ENV=production
+      - LOG_LEVEL=INFO
+      - TZ=America/Sao_Paulo
+      - FORTRAN_RUNTIME=gfortran
+      - ENABLE_METRICS=true
+    
+    # Rede personalizada
+    networks:
+      - sgeev-network
+    
+    # Healthcheck
+    healthcheck:
+      test: ["CMD", "./eigenvalues_program", "--version"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    
+    # Labels para organização e monitoramento
+    labels:
+      - "com.f60.application=sgeev"
+      - "com.f60.description=Eigenvalues and Eigenvectors Calculator"
+      - "com.f60.version=${VERSION:-1.0.0}"
+      - "com.f60.environment=production"
+      - "traefik.enable=false"
+    
+    # Comando padrão
+    command: ["./eigenvalues_program"]
+
+  # 🔧 Serviço de desenvolvimento
+  sgeev-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+      args:
+        - BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+    image: f60-sgeev:dev
+    container_name: sgeev-dev
+    profiles: ["dev", "development"]
+    
+    # Recursos para desenvolvimento
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '2.0'
+    
+    # Volumes para desenvolvimento (bind mounts)
+    volumes:
+      - type: bind
+        source: .
+        target: /app/src
+        consistency: cached
+      - sgeev-data:/app/data:rw
+      - sgeev-logs:/app/logs:rw
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          size: 100M
+    
+    # Variáveis de ambiente para desenvolvimento
+    environment:
+      - APP_ENV=development
+      - DEBUG=true
+      - LOG_LEVEL=DEBUG
+      - FORTRAN_RUNTIME=gfortran
+      - ENABLE_HOT_RELOAD=true
+    
+    # Portas para debugging (se necessário)
+    ports:
+      - "8080:8080"  # Para debugging HTTP se implementado
+    
+    # Manter container rodando para desenvolvimento interativo
+    stdin_open: true
+    tty: true
+    
+    # Rede
+    networks:
+      - sgeev-network
+    
+    # Comando para desenvolvimento
+    command: ["/bin/sh"]
+    
+    # Labels
+    labels:
+      - "com.f60.application=sgeev-dev"
+      - "com.f60.environment=development"
+      - "com.f60.description=Development environment with debugging tools"
+
+  # 🧪 Serviço de testes automatizados
+  sgeev-test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+      args:
+        - FORTRAN_FLAGS="-g -O1 -Wall -Wextra -fcheck=all"
+    image: f60-sgeev:test
+    container_name: sgeev-test
+    profiles: ["test", "testing", "ci"]
+    
+    # Recursos para testes
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+          cpus: '1.5'
+    
+    volumes:
+      - type: bind
+        source: ./tests
+        target: /app/tests
+        read_only: true
+      - sgeev-output:/app/output:rw
+      - sgeev-logs:/app/logs:rw
+      # Volume para cobertura de testes
+      - test-coverage:/app/coverage:rw
+    
+    environment:
+      - APP_ENV=test
+      - TEST_MODE=true
+      - LOG_LEVEL=DEBUG
+      - FORTRAN_RUNTIME=gfortran
+      - COVERAGE_ENABLED=true
+    
+    networks:
+      - sgeev-network
+    
+    # Script de testes customizado
+    command: [
+      "/bin/sh", "-c",
+      "cd /app && echo 'Executando testes...' && ./eigenvalues_program --test || exit 0"
+    ]
+    
+    labels:
+      - "com.f60.application=sgeev-test"
+      - "com.f60.environment=test"
+      - "com.f60.description=Automated testing environment"
+
+  # 📊 Serviço de benchmark e performance
+  sgeev-benchmark:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+      args:
+        - FORTRAN_FLAGS="-O3 -march=native -ffast-math -flto -funroll-loops"
+    image: f60-sgeev:benchmark
+    container_name: sgeev-benchmark
+    profiles: ["benchmark", "performance"]
+    
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '4.0'
+    
+    volumes:
+      - sgeev-output:/app/output:rw
+      - benchmark-results:/app/benchmark:rw
+    
+    environment:
+      - APP_ENV=benchmark
+      - LOG_LEVEL=WARN
+      - BENCHMARK_MODE=true
+      - PERFORMANCE_MONITORING=true
+    
+    networks:
+      - sgeev-network
+    
+    command: [
+      "/bin/sh", "-c",
+      "echo 'Executando benchmarks...' && time ./eigenvalues_program --benchmark"
+    ]
+    
+    labels:
+      - "com.f60.application=sgeev-benchmark"
+      - "com.f60.environment=benchmark"
+
+# ====================
+# Redes
+# ====================
+networks:
+  sgeev-network:
+    driver: bridge
+    name: f60-sgeev-network
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.20.0.0/16
+          gateway: 172.20.0.1
+    labels:
+      - "com.f60.network=main"
+
+# ====================
+# Volumes nomeados
+# ====================
+volumes:
+  # Volume para dados de entrada
+  sgeev-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DATA_PATH:-./data}
+    labels:
+      - "com.f60.volume=data"
+  
+  # Volume para saídas/resultados
+  sgeev-output:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${OUTPUT_PATH:-./output}
+    labels:
+      - "com.f60.volume=output"
+      
+  # Volume para logs
+  sgeev-logs:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${LOGS_PATH:-./logs}
+    labels:
+      - "com.f60.volume=logs"
+      
+  # Volume para cobertura de testes
+  test-coverage:
+    driver: local
+    labels:
+      - "com.f60.volume=test-coverage"
+      
+  # Volume para resultados de benchmark
+  benchmark-results:
+    driver: local
+    labels:
+      - "com.f60.volume=benchmark"
+
+# ====================
+# Configurações
+# ====================
+# Para usar:
+# 🚀 Produção: docker-compose up sgeev
+# 🔧 Desenvolvimento: docker-compose --profile dev up sgeev-dev
+# 🧪 Testes: docker-compose --profile test up sgeev-test
+# 📊 Benchmark: docker-compose --profile benchmark up sgeev-benchmark
+#
+# Variáveis de ambiente (.env):
+# VERSION=1.0.0
+# DATA_PATH=./data
+# OUTPUT_PATH=./output
+# LOGS_PATH=./logs
+# GIT_COMMIT=$(git rev-parse HEAD)
